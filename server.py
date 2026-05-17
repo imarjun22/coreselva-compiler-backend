@@ -201,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    port = int(os.environ.get("PORT", 8765))
     print(f"RISC-V Compiler Backend running on http://localhost:{port}")
     print("Endpoint: POST /compile")
     HTTPServer(("", port), Handler).serve_forever()
