@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 RISC-V C-to-Hex Compiler Backend
-Requires: riscv64-unknown-elf-gcc toolchain installed
-Install on Ubuntu: sudo apt install gcc-riscv64-unknown-elf
+
+Requires:
+- riscv64-unknown-elf-gcc toolchain installed
+
+Install on Ubuntu:
+- sudo apt install gcc-riscv64-unknown-elf
 """
 
 import os
-import sys
 import json
 import tempfile
 import subprocess
@@ -59,39 +62,81 @@ _hang:
     j    _hang
 """
 
-ALLOWED_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000",
-                   "http://localhost:5500", "http://127.0.0.1:5500",
-                   "null", "*"]
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "null",
+    "*",
+]
 
-def compile_c_to_hex(c_code: str, opt_level: str = "O0", output_format: str = "verilog"):
+# Supported ISA/ABI pairs
+ARCH_ABI_MAP = {
+    "rv32i": "ilp32",
+    "rv32im": "ilp32",
+    "rv32imc": "ilp32",
+    "rv64i": "lp64",
+    "rv64im": "lp64",
+    "rv64imc": "lp64",
+}
+
+
+def compile_c_to_hex(
+    c_code: str,
+    opt_level: str = "O0",
+    output_format: str = "verilog",
+    arch: str = "rv32im",
+):
     """Compile C code to RISC-V hex using the installed toolchain."""
+    logs = []
+
+    if arch not in ARCH_ABI_MAP:
+        return {
+            "success": False,
+            "error": f"Unsupported arch: {arch}",
+            "logs": logs,
+        }
+
+    abi = ARCH_ABI_MAP[arch]
+
     with tempfile.TemporaryDirectory() as tmpdir:
         # Write source files
-        main_c    = os.path.join(tmpdir, "main.c")
-        link_ld   = os.path.join(tmpdir, "link.ld")
+        main_c = os.path.join(tmpdir, "main.c")
+        link_ld = os.path.join(tmpdir, "link.ld")
         startup_s = os.path.join(tmpdir, "startup.S")
-        main_o    = os.path.join(tmpdir, "main.o")
+        main_o = os.path.join(tmpdir, "main.o")
         startup_o = os.path.join(tmpdir, "startup.o")
-        main_elf  = os.path.join(tmpdir, "main.elf")
-        main_hex  = os.path.join(tmpdir, "main.hex")
-        main_asm  = os.path.join(tmpdir, "main.asm")
+        main_elf = os.path.join(tmpdir, "main.elf")
+        main_hex = os.path.join(tmpdir, "main.hex")
 
-        with open(main_c,    "w") as f: f.write(c_code)
-        with open(link_ld,   "w") as f: f.write(LINKER_SCRIPT)
-        with open(startup_s, "w") as f: f.write(STARTUP_S)
+        with open(main_c, "w", encoding="utf-8") as f:
+            f.write(c_code)
 
-        arch_flags = ["-march=rv32im", "-mabi=ilp32", f"-{opt_level}",
-                      "-nostdlib", "-ffreestanding"]
-        gcc     = "riscv64-unknown-elf-gcc"
+        with open(link_ld, "w", encoding="utf-8") as f:
+            f.write(LINKER_SCRIPT)
+
+        with open(startup_s, "w", encoding="utf-8") as f:
+            f.write(STARTUP_S)
+
+        arch_flags = [
+            f"-march={arch}",
+            f"-mabi={abi}",
+            f"-{opt_level}",
+            "-nostdlib",
+            "-ffreestanding",
+        ]
+
+        gcc = "riscv64-unknown-elf-gcc"
         objcopy = "riscv64-unknown-elf-objcopy"
         objdump = "riscv64-unknown-elf-objdump"
-
-        logs = []
 
         # Compile main.c
         r = subprocess.run(
             [gcc, *arch_flags, "-c", main_c, "-o", main_o],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         logs.append(("compile main.c", r.returncode, r.stdout, r.stderr))
         if r.returncode != 0:
             return {"success": False, "error": r.stderr, "logs": logs}
@@ -99,7 +144,9 @@ def compile_c_to_hex(c_code: str, opt_level: str = "O0", output_format: str = "v
         # Assemble startup.S
         r = subprocess.run(
             [gcc, *arch_flags, "-c", startup_s, "-o", startup_o],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         logs.append(("assemble startup.S", r.returncode, r.stdout, r.stderr))
         if r.returncode != 0:
             return {"success": False, "error": r.stderr, "logs": logs}
@@ -107,21 +154,25 @@ def compile_c_to_hex(c_code: str, opt_level: str = "O0", output_format: str = "v
         # Link
         r = subprocess.run(
             [gcc, *arch_flags, "-T", link_ld, startup_o, main_o, "-o", main_elf],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         logs.append(("link", r.returncode, r.stdout, r.stderr))
         if r.returncode != 0:
             return {"success": False, "error": r.stderr, "logs": logs}
 
         # objcopy → verilog hex
+        # We keep using verilog output, then normalize into one 32-bit word per line.
         r = subprocess.run(
             [objcopy, "-O", "verilog", main_elf, main_hex],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         logs.append(("objcopy", r.returncode, r.stdout, r.stderr))
         if r.returncode != 0:
             return {"success": False, "error": r.stderr, "logs": logs}
 
-        # Convert to 8-digit hex, one 32-bit word per line, no @ lines
-        with open(main_hex, "r") as f:
+        with open(main_hex, "r", encoding="utf-8") as f:
             raw = f.read()
 
         lines_out = []
@@ -130,7 +181,7 @@ def compile_c_to_hex(c_code: str, opt_level: str = "O0", output_format: str = "v
                 continue  # skip address markers
             words = line.strip().split()
             for i in range(0, len(words), 4):
-                chunk = words[i:i+4]
+                chunk = words[i : i + 4]
                 while len(chunk) < 4:
                     chunk.append("00")
                 lines_out.append("".join(chunk))
@@ -140,7 +191,9 @@ def compile_c_to_hex(c_code: str, opt_level: str = "O0", output_format: str = "v
         # objdump → disassembly
         r = subprocess.run(
             [objdump, "-d", "--no-show-raw-insn", main_elf],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         asm_text = r.stdout if r.returncode == 0 else "(disassembly unavailable)"
 
         with open(main_elf, "rb") as f:
@@ -166,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS, GET")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
@@ -174,28 +227,52 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
+    def do_GET(self):
+        # Simple health/status response for browser testing
+        if urlparse(self.path).path == "/":
+            body = b"CoreSelva compiler backend is running."
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        self.send_response(404)
+        self._cors()
+        self.end_headers()
+
     def do_POST(self):
         if urlparse(self.path).path != "/compile":
-            self.send_response(404); self.end_headers(); return
+            self.send_response(404)
+            self._cors()
+            self.end_headers()
+            return
 
         length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
+        body = self.rfile.read(length)
+
         try:
             payload = json.loads(body)
         except Exception:
-            self.send_response(400); self.end_headers(); return
+            self.send_response(400)
+            self._cors()
+            self.end_headers()
+            return
 
         c_code = payload.get("code", "")
-        opt    = payload.get("opt", "O0")
-        fmt    = payload.get("format", "verilog")
+        opt = payload.get("opt", "O0")
+        fmt = payload.get("format", "verilog")
+        arch = payload.get("arch", "rv32im")
 
-        result = compile_c_to_hex(c_code, opt, fmt)
+        result = compile_c_to_hex(c_code, opt, fmt, arch)
 
         resp = json.dumps(result).encode()
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", len(resp))
+        self.send_header("Content-Length", str(len(resp)))
         self.end_headers()
         self.wfile.write(resp)
 
